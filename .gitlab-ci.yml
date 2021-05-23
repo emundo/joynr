@@ -1,0 +1,195 @@
+workflow:
+    rules:
+        -   if: $CI_COMMIT_TAG
+default:
+    interruptible: true
+stages:
+    - base
+    - cpp-base
+    - build
+    - publish
+
+variables:
+    JAVA_OPTS: "-Xmx2g' -XX:PermSize=2048m -XX:MaxPermSize=1024m -XX:-UsePerfData"
+    MAVEN_OPTS: "-Djava.awt.headless=true -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+    MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+
+cache:
+    paths:
+        - $CI_PROJECT_DIR/.m2/repository
+
+.no-cache-job:
+    tags:
+        - low-cpu
+    cache:
+        key: "none"
+        policy: pull
+    dependencies: [ ]
+
+joynr-base:
+    stage: base
+    extends: .no-cache-job
+    image:
+        name: gcr.io/kaniko-project/executor:debug
+        entrypoint: [ "" ]
+    tags:
+        - docker
+        - kaniko
+    script:
+        - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
+        - "export CI_COMMIT_TAG"
+        - echo $CI_COMMIT_TAG
+        - sed -i "s/^VOLUME/RUN mkdir -p/" $CI_PROJECT_DIR/docker/joynr-base/Dockerfile
+        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - >
+            /kaniko/executor
+            --cleanup --cache=true
+            --context $CI_PROJECT_DIR/docker/joynr-base/
+            --dockerfile $CI_PROJECT_DIR/docker/joynr-base/Dockerfile
+            --destination $CI_REGISTRY_IMAGE/joynr-base:latest
+            --destination $CI_REGISTRY_IMAGE/joynr-base:$CI_COMMIT_TAG
+
+cpp-base:
+    stage: cpp-base
+    extends: .no-cache-job
+    needs:
+        - joynr-base
+    image:
+        name: gcr.io/kaniko-project/executor:debug
+        entrypoint: [ "" ]
+    tags:
+        - docker
+        - kaniko
+    script:
+        - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
+        - "export CI_COMMIT_TAG"
+        - echo $CI_COMMIT_TAG
+        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - sed -i "s|joynr-base|$CI_REGISTRY_IMAGE/joynr-base|" $CI_PROJECT_DIR/docker/joynr-cpp-base/Dockerfile
+        - tail -n+2 $CI_PROJECT_DIR/docker/joynr-cpp-clang/Dockerfile >> $CI_PROJECT_DIR/docker/joynr-cpp-base/Dockerfile
+        - echo -e "\nRUN date -R > /data/timestamp" >> $CI_PROJECT_DIR/docker/joynr-cpp-base/Dockerfile
+        - >
+            /kaniko/executor
+            --cleanup
+            --cache=true
+            --context $CI_PROJECT_DIR/docker/joynr-cpp-base/
+            --dockerfile $CI_PROJECT_DIR/docker/joynr-cpp-base/Dockerfile
+            --destination $CI_REGISTRY_IMAGE/joynr-cpp-base:latest
+            --destination $CI_REGISTRY_IMAGE/joynr-cpp-base:$CI_COMMIT_TAG
+
+discovery-build:
+    image:
+        name: maven:3.8.1-adoptopenjdk-8
+    stage: build
+    artifacts:
+        paths:
+            - "java/backend-services/capabilities-directory/target/deploy/capabilities-directory-jar-with-dependencies.jar"
+        expire_in: 1 week
+    script:
+        - mvn clean install -pl :capabilities-directory -DskipTests=true -P no-checkstyle,no-license-and-notice,no-java-formatter
+
+discovery-docker:
+    stage: publish
+    extends: .no-cache-job
+    dependencies:
+        - discovery-build
+    image:
+        name: gcr.io/kaniko-project/executor:debug
+        entrypoint: [ "" ]
+    tags:
+        - docker
+        - kaniko
+    script:
+        - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
+        - "export CI_COMMIT_TAG"
+        - echo $CI_COMMIT_TAG
+        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - |
+            cat > $CI_PROJECT_DIR/discovery-service.Dockerfile << EOF
+            FROM adoptopenjdk/openjdk8:alpine-slim
+            WORKDIR /
+            COPY ./java/backend-services/capabilities-directory/target/deploy/capabilities-directory-jar-with-dependencies.jar /
+            EXPOSE 9999
+            CMD ["java","-jar","capabilities-directory-jar-with-dependencies.jar"]
+            EOF
+        - >
+            /kaniko/executor
+            --cleanup
+            --cache=true
+            --context $CI_PROJECT_DIR
+            --dockerfile $CI_PROJECT_DIR/discovery-service.Dockerfile
+            --destination $CI_REGISTRY_IMAGE/discovery-service:latest
+            --destination $CI_REGISTRY_IMAGE/discovery-service:$CI_COMMIT_TAG
+
+cluster-build:
+    stage: build
+    timeout: 3h
+    needs:
+        - cpp-base
+    image:
+        name: gcr.io/kaniko-project/executor:debug
+        entrypoint: [ "" ]
+    tags:
+        - docker
+        - kaniko
+    script:
+        - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
+        - "export CI_COMMIT_TAG"
+        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - |
+            cat > $CI_PROJECT_DIR/cluster-base.Dockerfile << EOF
+            FROM $CI_REGISTRY_IMAGE/joynr-cpp-base:latest
+            WORKDIR /data/
+            ENV MAVEN_OPTS="-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dmaven.repo.local=/data/src/.m2/repository"
+            COPY ./ /data/src
+            RUN MAVEN_OPTS="-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dmaven.repo.local=/data/src/.m2/repository" \
+                /data/src/docker/joynr-cpp-base/scripts/build/cpp-generate.sh | egrep -v "Download(ing|ed) from" && \
+                /data/src/docker/joynr-cpp-base/scripts/build/cpp-clean-build.sh --jobs 4 --enableclangformatter OFF --buildtests OFF && \
+                mv /data/build/joynr/joynr-clean-build.tar.gz / && rm -rf /data
+            EOF
+        - >
+            /kaniko/executor
+            --use-new-run
+            --single-snapshot
+            --context $CI_PROJECT_DIR
+            --dockerfile $CI_PROJECT_DIR/cluster-base.Dockerfile
+            --destination $CI_REGISTRY_IMAGE/cluster-base:latest
+            --destination $CI_REGISTRY_IMAGE/cluster-base:$CI_COMMIT_TAG
+
+cluster-docker:
+    stage: publish
+    needs:
+        - cluster-build
+    image:
+        name: gcr.io/kaniko-project/executor:debug
+        entrypoint: [ "" ]
+    tags:
+        - docker
+        - kaniko
+    script:
+        - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
+        - "export CI_COMMIT_TAG"
+        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - |
+            cat > $CI_PROJECT_DIR/cluster-controller.Dockerfile << EOF
+            FROM $CI_REGISTRY_IMAGE/cluster-base:latest AS CPP_BUILD_BASE
+
+            FROM $CI_REGISTRY_IMAGE/joynr-cpp-base:latest
+            RUN rm -rf /data && mkdir -p /data
+            COPY --from=CPP_BUILD_BASE /joynr-clean-build.tar.gz /data/joynr-clean-build.tar.gz
+            RUN tar -xvf /data/joynr-clean-build.tar.gz -C /data && rm -rf /data/joynr-clean-build.tar.gz
+            RUN sed -i 's/\[cluster-controller\]/\[cluster-controller\]\nuds-enabled=false/g' /data/bin/resources/default-clustercontroller.settings
+            EXPOSE 4242
+            EXPOSE 4243
+
+            WORKDIR /data/bin/
+            ENTRYPOINT ["./cluster-controller"]
+            EOF
+        - >
+            /kaniko/executor
+            --use-new-run
+            --single-snapshot
+            --context $CI_PROJECT_DIR
+            --dockerfile $CI_PROJECT_DIR/cluster-controller.Dockerfile
+            --destination $CI_REGISTRY_IMAGE/cluster-controller:latest
+            --destination $CI_REGISTRY_IMAGE/cluster-controller:$CI_COMMIT_TAG
