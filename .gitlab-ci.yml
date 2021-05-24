@@ -7,6 +7,7 @@ stages:
     - base
     - cpp-base
     - build
+    - pre-publish
     - publish
 
 variables:
@@ -19,8 +20,6 @@ cache:
         - $CI_PROJECT_DIR/.m2/repository
 
 .no-cache-job:
-    tags:
-        - low-cpu
     cache:
         key: "none"
         policy: pull
@@ -40,7 +39,7 @@ joynr-base:
         - "export CI_COMMIT_TAG"
         - echo $CI_COMMIT_TAG
         - sed -i "s/^VOLUME/RUN mkdir -p/" $CI_PROJECT_DIR/docker/joynr-base/Dockerfile
-        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - mkdir -p ~/.docker/ && cp $DCKRCFG ~/.docker/config.json
         - >
             /kaniko/executor
             --cleanup --cache=true
@@ -64,7 +63,7 @@ cpp-base:
         - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
         - "export CI_COMMIT_TAG"
         - echo $CI_COMMIT_TAG
-        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - mkdir -p ~/.docker/ && cp $DCKRCFG ~/.docker/config.json
         - sed -i "s|joynr-base|$CI_REGISTRY_IMAGE/joynr-base|" $CI_PROJECT_DIR/docker/joynr-cpp-base/Dockerfile
         - tail -n+2 $CI_PROJECT_DIR/docker/joynr-cpp-clang/Dockerfile >> $CI_PROJECT_DIR/docker/joynr-cpp-base/Dockerfile
         - echo -e "\nRUN date -R > /data/timestamp" >> $CI_PROJECT_DIR/docker/joynr-cpp-base/Dockerfile
@@ -89,7 +88,7 @@ discovery-build:
         - mvn clean install -pl :capabilities-directory -DskipTests=true -P no-checkstyle,no-license-and-notice,no-java-formatter
 
 discovery-docker:
-    stage: publish
+    stage: pre-publish
     extends: .no-cache-job
     dependencies:
         - discovery-build
@@ -99,11 +98,13 @@ discovery-docker:
     tags:
         - docker
         - kaniko
+    variables:
+        GIT_STRATEGY: none
     script:
         - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
         - "export CI_COMMIT_TAG"
         - echo $CI_COMMIT_TAG
-        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - mkdir -p ~/.docker/ && cp $DCKRCFG ~/.docker/config.json
         - |
             cat > $CI_PROJECT_DIR/discovery-service.Dockerfile << EOF
             FROM adoptopenjdk/openjdk8:alpine-slim
@@ -135,7 +136,7 @@ cluster-build:
     script:
         - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
         - "export CI_COMMIT_TAG"
-        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - mkdir -p ~/.docker/ && cp $DCKRCFG ~/.docker/config.json
         - |
             cat > $CI_PROJECT_DIR/cluster-base.Dockerfile << EOF
             FROM $CI_REGISTRY_IMAGE/joynr-cpp-base:latest
@@ -157,7 +158,7 @@ cluster-build:
             --destination $CI_REGISTRY_IMAGE/cluster-base:$CI_COMMIT_TAG
 
 cluster-docker:
-    stage: publish
+    stage: pre-publish
     needs:
         - cluster-build
     image:
@@ -166,10 +167,12 @@ cluster-docker:
     tags:
         - docker
         - kaniko
+    variables:
+        GIT_STRATEGY: none
     script:
         - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
         - "export CI_COMMIT_TAG"
-        - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"gitlab-ci-token\",\"password\":\"$CI_JOB_TOKEN\"}}}" > /kaniko/.docker/config.json
+        - mkdir -p ~/.docker/ && cp $DCKRCFG ~/.docker/config.json
         - |
             cat > $CI_PROJECT_DIR/cluster-controller.Dockerfile << EOF
             FROM $CI_REGISTRY_IMAGE/cluster-base:latest AS CPP_BUILD_BASE
@@ -193,3 +196,36 @@ cluster-docker:
             --dockerfile $CI_PROJECT_DIR/cluster-controller.Dockerfile
             --destination $CI_REGISTRY_IMAGE/cluster-controller:latest
             --destination $CI_REGISTRY_IMAGE/cluster-controller:$CI_COMMIT_TAG
+
+publish:
+    stage: publish
+    dependencies: []
+    image: mminks/dind-aech:latest
+    needs:
+        - cluster-docker
+        - discovery-docker
+    tags:
+        - docker
+        - default
+    variables:
+        GIT_STRATEGY: none
+    script:
+        - "[[ -z $CI_COMMIT_TAG ]] && CI_COMMIT_TAG=$CI_COMMIT_REF_SLUG"
+        - "export CI_COMMIT_TAG"
+        - mkdir -p ~/.docker/ && cp $DCKRCFG ~/.docker/config.json
+        - echo "push discovery-service"
+        - docker pull $CI_REGISTRY_IMAGE/discovery-service:latest
+        - docker tag $CI_REGISTRY_IMAGE/discovery-service:latest $REMOTE_REGISTRY_PREFIX/discovery-service:$CI_COMMIT_TAG
+        - docker tag $CI_REGISTRY_IMAGE/discovery-service:latest $REMOTE_REGISTRY_PREFIX/discovery-service:latest
+        - docker push $REMOTE_REGISTRY_PREFIX/discovery-service:$CI_COMMIT_TAG
+        - docker push $REMOTE_REGISTRY_PREFIX/discovery-service:latest
+        - docker rmi $CI_REGISTRY_IMAGE/discovery-service
+        - docker rmi $REMOTE_REGISTRY_PREFIX/discovery-service
+        - echo "push cluster-controller"
+        - docker pull $CI_REGISTRY_IMAGE/cluster-controller:latest
+        - docker tag $CI_REGISTRY_IMAGE/cluster-controller:latest $REMOTE_REGISTRY_PREFIX/cluster-controller:$CI_COMMIT_TAG
+        - docker tag $CI_REGISTRY_IMAGE/cluster-controller:latest $REMOTE_REGISTRY_PREFIX/cluster-controller:latest
+        - docker push $REMOTE_REGISTRY_PREFIX/cluster-controller:$CI_COMMIT_TAG
+        - docker push $REMOTE_REGISTRY_PREFIX/cluster-controller:latest
+        - docker rmi $CI_REGISTRY_IMAGE/cluster-controller
+        - docker rmi $REMOTE_REGISTRY_PREFIX/cluster-controller
