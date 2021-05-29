@@ -1,7 +1,7 @@
 <!--
   #%L
   %%
-  Copyright (C) 2011 - 2017 BMW Car IT GmbH
+  Copyright (C) 2021 BMW Car IT GmbH
   %%
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@
 	<parent>
 		<groupId>io.joynr.performance</groupId>
 		<artifactId>performance-test-jee</artifactId>
-		<version>1.16.0</version>
+		<version>1.17.0</version>
 	</parent>
 
 	<dependencies>
@@ -37,11 +37,6 @@
 		<dependency>
 			<groupId>io.joynr.java</groupId>
 			<artifactId>javaapi</artifactId>
-			<version>${project.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>io.joynr.java</groupId>
-			<artifactId>jeeintegration</artifactId>
 			<version>${project.version}</version>
 		</dependency>
 		<dependency>
@@ -65,9 +60,6 @@
 						<configuration>
 							<model>${basedir}/../../performance-test-base/src/main/model</model>
 							<generationLanguage>java</generationLanguage>
-							<parameter>
-								<jee>true</jee>
-							</parameter>
 							<outputPath>${basedir}/src/main/generated</outputPath>
 						</configuration>
 					</execution>

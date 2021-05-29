@@ -30,6 +30,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Collection;
@@ -46,10 +47,13 @@ import javax.inject.Inject;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.stubbing.Answer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
@@ -66,12 +70,15 @@ import io.joynr.arbitration.DiscoveryScope;
 import io.joynr.capabilities.ParticipantIdKeyUtil;
 import io.joynr.common.JoynrPropertiesModule;
 import io.joynr.dispatching.MutableMessageFactory;
+import io.joynr.exceptions.JoynrException;
 import io.joynr.exceptions.JoynrRuntimeException;
+import io.joynr.integration.util.TestSetup;
 import io.joynr.messaging.ConfigurableMessagingSettings;
 import io.joynr.messaging.FailureAction;
 import io.joynr.messaging.JoynrMessageProcessor;
 import io.joynr.messaging.MessagingPropertyKeys;
 import io.joynr.messaging.MessagingQos;
+import io.joynr.messaging.MessagingSkeletonFactory;
 import io.joynr.messaging.SuccessAction;
 import io.joynr.messaging.inprocess.InProcessMessagingStubFactory;
 import io.joynr.messaging.mqtt.IMqttMessagingSkeleton;
@@ -89,6 +96,7 @@ import io.joynr.messaging.routing.RoutingTable;
 import io.joynr.messaging.websocket.WebSocketClientMessagingStubFactory;
 import io.joynr.messaging.websocket.WebSocketMessagingStub;
 import io.joynr.messaging.websocket.WebSocketMessagingStubFactory;
+import io.joynr.messaging.websocket.WebsocketModule;
 import io.joynr.provider.JoynrProvider;
 import io.joynr.provider.ProviderAnnotations;
 import io.joynr.proxy.Future;
@@ -98,19 +106,25 @@ import io.joynr.proxy.ProxyBuilderFactory;
 import io.joynr.proxy.ProxyBuilderFactoryImpl;
 import io.joynr.proxy.ProxyInvocationHandlerFactory;
 import io.joynr.proxy.StatelessAsyncCallbackDirectory;
-import io.joynr.runtime.CCInProcessRuntimeModule;
+import io.joynr.runtime.CCWebSocketRuntimeModule;
 import io.joynr.runtime.JoynrRuntime;
 import io.joynr.runtime.ShutdownListener;
 import io.joynr.runtime.ShutdownNotifier;
 import io.joynr.runtime.SystemServicesSettings;
 import io.joynr.smrf.EncodingException;
 import io.joynr.smrf.UnsuppportedVersionException;
+import joynr.BroadcastFilterParameters;
+import joynr.BroadcastSubscriptionRequest;
 import joynr.ImmutableMessage;
 import joynr.Message;
 import joynr.MutableMessage;
+import joynr.OnChangeSubscriptionQos;
 import joynr.Reply;
+import joynr.Request;
 import joynr.system.DiscoveryAsync;
 import joynr.system.RoutingTypes.MqttAddress;
+import joynr.system.RoutingTypes.RoutingTypesUtil;
+import joynr.test.JoynrTestLoggingRule;
 import joynr.tests.DefaulttestProvider;
 import joynr.types.DiscoveryEntryWithMetaInfo;
 import joynr.types.GlobalDiscoveryEntry;
@@ -119,31 +133,36 @@ import joynr.types.ProviderScope;
 
 /**
  * Integration tests for RoutingTable reference count handling.
- *
  */
 public class AbstractRoutingTableCleanupTest {
+
+    private static final Logger logger = LoggerFactory.getLogger(AbstractRoutingTableCleanupTest.class);
+    @Rule
+    public JoynrTestLoggingRule joynrTestRule = new JoynrTestLoggingRule(logger);
 
     private final String TESTGBID1 = "testgbid1";
     private final String TESTGBID2 = "testgbid2";
     protected final String[] gbids = new String[]{ TESTGBID1, TESTGBID2 };
+    protected final MqttAddress replyToAddress = new MqttAddress(gbids[1], "");
 
     protected final String TESTCUSTOMDOMAIN1 = "testCustomDomain1";
     protected final String TESTCUSTOMDOMAIN2 = "testCustomDomain2";
     protected final String TESTCUSTOMDOMAIN3 = "testCustomDomain3";
 
-    protected final String FIXEDPARTICIPANTID1 = "fixedParticipantId1";
-    protected final String FIXEDPARTICIPANTID2 = "fixedParticipantId2";
-    protected final String FIXEDPARTICIPANTID3 = "fixedParticipantId3";
+    protected final String FIXEDPARTICIPANTID1 = "provider-1";
+    protected final String FIXEDPARTICIPANTID2 = "provider-2";
+    protected final String FIXEDPARTICIPANTID3 = "provider-3";
 
     private final long ROUTINGTABLE_CLEANUP_INTERVAL_MS = 100l;
     private final long ROUTING_MAX_RETRY_COUNT = 2;
 
     private Properties properties;
-    private Injector injector;
+    protected Injector injector;
     // JoynrRuntime to simulate user operations
     protected JoynrRuntime joynrRuntime;
     // MessagingSkeletonFactory to simulate incoming messages through messaging skeletons
     protected MqttMessagingSkeletonFactory mqttSkeletonFactory;
+    protected MessagingSkeletonFactory messagingSkeletonFactory;
     protected MutableMessageFactory messageFactory;
 
     // RoutingTable for verification, use the apply() method to count entries and get info about stored addresses
@@ -155,7 +174,7 @@ public class AbstractRoutingTableCleanupTest {
     protected ProviderQos providerQosLocal;
     protected MessagingQos defaultMessagingQos;
 
-    private ConcurrentMap<String, RoutingEntry> routingTableHashMap;
+    protected ConcurrentMap<String, RoutingEntry> routingTableHashMap;
 
     @Mock
     private MqttMessagingStubFactory mqttMessagingStubFactoryMock;
@@ -169,7 +188,7 @@ public class AbstractRoutingTableCleanupTest {
     @Mock
     protected MqttMessagingStub mqttMessagingStubMock;
     @Mock
-    private WebSocketMessagingStub webSocketClientMessagingStubMock;
+    protected WebSocketMessagingStub webSocketClientMessagingStubMock;
     @Mock
     private WebSocketMessagingStub webSocketMessagingStubMock;
 
@@ -229,7 +248,7 @@ public class AbstractRoutingTableCleanupTest {
     }
 
     @Before
-    public void setUp() throws InterruptedException {
+    public void setUp() throws InterruptedException, IOException {
         doReturn(joynrMqttClient1).when(hiveMqMqttClientFactory).createReceiver(TESTGBID1);
         doReturn(joynrMqttClient1).when(hiveMqMqttClientFactory).createSender(TESTGBID1);
         doReturn(joynrMqttClient2).when(hiveMqMqttClientFactory).createReceiver(TESTGBID2);
@@ -250,6 +269,7 @@ public class AbstractRoutingTableCleanupTest {
         discoveryQosGlobal.setDiscoveryTimeoutMs(30000);
         discoveryQosGlobal.setRetryIntervalMs(discoveryQosGlobal.getDiscoveryTimeoutMs() + 1); // no retry
         discoveryQosGlobal.setDiscoveryScope(DiscoveryScope.GLOBAL_ONLY);
+        discoveryQosGlobal.setCacheMaxAgeMs(10000);
 
         discoveryQosLocal = new DiscoveryQos();
         discoveryQosLocal.setDiscoveryTimeoutMs(30000);
@@ -270,6 +290,7 @@ public class AbstractRoutingTableCleanupTest {
         routingTable = injector.getInstance(RoutingTable.class);
         MqttMessagingSkeletonProvider mqttMessagingSkeletonProvider = injector.getInstance(MqttMessagingSkeletonProvider.class);
         mqttSkeletonFactory = (MqttMessagingSkeletonFactory) mqttMessagingSkeletonProvider.get();
+        messagingSkeletonFactory = injector.getInstance(MessagingSkeletonFactory.class);
         messageFactory = injector.getInstance(MutableMessageFactory.class);
 
         // Get routingTable.hashMap
@@ -290,8 +311,11 @@ public class AbstractRoutingTableCleanupTest {
         }
     }
 
-    private Properties createProperties(String gbids, String brokerUris) {
+    private Properties createProperties(String gbids, String brokerUris) throws IOException {
         Properties properties = new Properties();
+        properties.setProperty(WebsocketModule.PROPERTY_WEBSOCKET_MESSAGING_HOST, "localhost");
+        properties.setProperty(WebsocketModule.PROPERTY_WEBSOCKET_MESSAGING_PORT, "" + TestSetup.findFreePort());
+
         properties.setProperty(ConfigurableMessagingSettings.PROPERTY_GBIDS, gbids);
         properties.setProperty(MqttModule.PROPERTY_MQTT_BROKER_URIS, brokerUris);
         properties.setProperty(MqttModule.PROPERTY_KEY_MQTT_KEEP_ALIVE_TIMERS_SEC, "60,30");
@@ -353,19 +377,6 @@ public class AbstractRoutingTableCleanupTest {
         return result;
     }
 
-    protected void registerProvider(JoynrProvider provider, String domain, ProviderQos providerQos) {
-        try {
-            // wait for successful registration
-            joynrRuntime.getProviderRegistrar(domain, provider)
-                        .withProviderQos(providerQos)
-                        .awaitGlobalRegistration()
-                        .register()
-                        .get(10000);
-        } catch (Exception e) {
-            fail("Provider registration failed: " + e.toString());
-        }
-    }
-
     protected Answer<Void> createVoidCountDownAnswer(CountDownLatch countDownLatch) {
         return invocation -> {
             countDownLatch.countDown();
@@ -387,6 +398,34 @@ public class AbstractRoutingTableCleanupTest {
                                           new MessagingQos());
     }
 
+    protected MutableMessage createReplyWithException(ImmutableMessage requestMessage, JoynrException error) {
+        String requestReplyId = requestMessage.getCustomHeaders().get(Message.CUSTOM_HEADER_REQUEST_REPLY_ID);
+        return messageFactory.createReply(requestMessage.getRecipient(),
+                                          requestMessage.getSender(),
+                                          new Reply(requestReplyId, error),
+                                          new MessagingQos());
+    }
+
+    protected MutableMessage createRequestMsg(final String from, final String to) {
+        Request request = new Request("voidOperation", new Object[0], new Class[0]);
+        MutableMessage requestMsg = messageFactory.createRequest(from, to, request, defaultMessagingQos);
+        String replyTo = RoutingTypesUtil.toAddressString(replyToAddress);
+        requestMsg.setReplyTo(replyTo);
+        return requestMsg;
+    }
+
+    protected MutableMessage createSrqMsg(final String from, final String to, String subscriptionId, long validityMs) {
+        OnChangeSubscriptionQos qos = new OnChangeSubscriptionQos().setMinIntervalMs(0).setValidityMs(validityMs);
+        BroadcastSubscriptionRequest request = new BroadcastSubscriptionRequest(subscriptionId,
+                                                                                "intBroadcast",
+                                                                                new BroadcastFilterParameters(),
+                                                                                qos);
+        MutableMessage requestMsg = messageFactory.createSubscriptionRequest(from, to, request, defaultMessagingQos);
+        String replyTo = RoutingTypesUtil.toAddressString(replyToAddress);
+        requestMsg.setReplyTo(replyTo);
+        return requestMsg;
+    }
+
     protected void fakeIncomingMqttMessage(String targetGbid, MutableMessage msg) throws EncodingException,
                                                                                   UnsuppportedVersionException {
         IMqttMessagingSkeleton skeleton = (IMqttMessagingSkeleton) mqttSkeletonFactory.getSkeleton(new MqttAddress(targetGbid,
@@ -399,78 +438,11 @@ public class AbstractRoutingTableCleanupTest {
         });
     }
 
-    protected void registerGlobal(JoynrProvider provider, String domain, ProviderQos providerQos) {
-        reset(mqttMessagingStubMock);
-        CountDownLatch publishCountDownLatch = new CountDownLatch(1);
-        ArgumentCaptor<ImmutableMessage> messageCaptor = ArgumentCaptor.forClass(ImmutableMessage.class);
-        doAnswer(createVoidCountDownAnswer(publishCountDownLatch)).when(mqttMessagingStubMock)
-                                                                  .transmit(messageCaptor.capture(),
-                                                                            any(SuccessAction.class),
-                                                                            any(FailureAction.class));
-
-        Future<Void> future = joynrRuntime.getProviderRegistrar(domain, provider)
-                                          .withProviderQos(providerQos)
-                                          .withGbids(gbids)
-                                          .awaitGlobalRegistration()
-                                          .register();
-
-        try {
-            assertTrue(publishCountDownLatch.await(1500, TimeUnit.MILLISECONDS));
-        } catch (InterruptedException e) {
-            fail(e.toString());
-        }
-
-        verify(mqttMessagingStubMock).transmit(any(ImmutableMessage.class),
-                                               any(SuccessAction.class),
-                                               any(FailureAction.class));
-        ImmutableMessage capturedMessage = messageCaptor.getValue();
-        assertEquals(Message.MessageType.VALUE_MESSAGE_TYPE_REQUEST, capturedMessage.getType());
-        assertEquals(getGcdParticipantId(), capturedMessage.getRecipient());
-
-        reset(mqttMessagingStubMock);
-
-        try {
-            MutableMessage replyMessage = createVoidReply(capturedMessage);
-            fakeIncomingMqttMessage(gbids[0], replyMessage);
-            // wait for successful registration
-            future.get(10000);
-        } catch (Exception e) {
-            fail("Provider registration failed: " + e.toString());
-        }
-    }
-
-    protected void waitForGlobalRemove() {
-        CountDownLatch publishCountDownLatch = new CountDownLatch(1);
-        ArgumentCaptor<ImmutableMessage> messageCaptor = ArgumentCaptor.forClass(ImmutableMessage.class);
-        doAnswer(createVoidCountDownAnswer(publishCountDownLatch)).when(mqttMessagingStubMock)
-                                                                  .transmit(messageCaptor.capture(),
-                                                                            any(SuccessAction.class),
-                                                                            any(FailureAction.class));
-
-        try {
-            assertTrue(publishCountDownLatch.await(1500, TimeUnit.MILLISECONDS));
-        } catch (InterruptedException e) {
-            fail(e.toString());
-        }
-
-        verify(mqttMessagingStubMock).transmit(any(ImmutableMessage.class),
-                                               any(SuccessAction.class),
-                                               any(FailureAction.class));
-        ImmutableMessage capturedMessage = messageCaptor.getValue();
-        assertEquals(Message.MessageType.VALUE_MESSAGE_TYPE_REQUEST, capturedMessage.getType());
-        assertEquals(getGcdParticipantId(), capturedMessage.getRecipient());
-
-        reset(mqttMessagingStubMock);
-
-        try {
-            MutableMessage replyMessage = createVoidReply(capturedMessage);
-            fakeIncomingMqttMessage(gbids[0], replyMessage);
-        } catch (Exception e) {
-            fail("Provider unregistration failed: " + e.toString());
-        }
-    }
-
     protected void checkRefCnt(String participantId, long expectedRefCnt) {
+        if (expectedRefCnt == 0) {
+            assertFalse(routingTable.containsKey(participantId));
+            return;
+        }
         assertTrue(routingTable.containsKey(participantId));
         RoutingEntry routingEntry = routingTableHashMap.get(participantId);
         long actualRefCnt = routingEntry.getRefCount();
@@ -493,6 +465,22 @@ public class AbstractRoutingTableCleanupTest {
                 return result;
             }
         };
+    }
+
+    protected void waitFor(CountDownLatch cdl, long timeout) {
+        try {
+            assertTrue(cdl.await(timeout, TimeUnit.MILLISECONDS));
+        } catch (InterruptedException e) {
+            fail("wait failed: " + e);
+        }
+    }
+
+    protected void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (Exception e) {
+            fail("Sleep failed: " + e);
+        }
     }
 
     protected void waitForGarbageCollection(String proxyParticipantId) throws InterruptedException {
@@ -558,7 +546,7 @@ public class AbstractRoutingTableCleanupTest {
             }
         };
 
-        injector = Guice.createInjector(override(new CCInProcessRuntimeModule(),
+        injector = Guice.createInjector(override(new CCWebSocketRuntimeModule(),
                                                  new HivemqMqttClientModule()).with(new JoynrPropertiesModule(properties),
                                                                                     testBindingsModule));
         CountDownLatch cdl = waitForRemoveStale(mqttMessagingStubMock);
@@ -570,10 +558,99 @@ public class AbstractRoutingTableCleanupTest {
         return joynrRuntime;
     }
 
-    protected void unregisterGlobalProvider(String domain, Object provider) {
+    protected void registerProvider(JoynrProvider provider, String domain, ProviderQos providerQos) {
+        try {
+            // wait for successful registration
+            joynrRuntime.getProviderRegistrar(domain, provider)
+                        .withProviderQos(providerQos)
+                        .awaitGlobalRegistration()
+                        .register()
+                        .get(10000);
+        } catch (Exception e) {
+            fail("Provider registration failed: " + e.toString());
+        }
+    }
+
+    protected void registerGlobal(JoynrProvider provider, String domain, ProviderQos providerQos) {
         reset(mqttMessagingStubMock);
+        CountDownLatch publishCountDownLatch = new CountDownLatch(1);
+        ArgumentCaptor<ImmutableMessage> messageCaptor = ArgumentCaptor.forClass(ImmutableMessage.class);
+        doAnswer(createVoidCountDownAnswer(publishCountDownLatch)).when(mqttMessagingStubMock)
+                                                                  .transmit(messageCaptor.capture(),
+                                                                            any(SuccessAction.class),
+                                                                            any(FailureAction.class));
+
+        Future<Void> future = joynrRuntime.getProviderRegistrar(domain, provider)
+                                          .withProviderQos(providerQos)
+                                          .withGbids(gbids)
+                                          .awaitGlobalRegistration()
+                                          .register();
+
+        try {
+            assertTrue(publishCountDownLatch.await(1500, TimeUnit.MILLISECONDS));
+        } catch (InterruptedException e) {
+            fail(e.toString());
+        }
+
+        verify(mqttMessagingStubMock).transmit(any(ImmutableMessage.class),
+                                               any(SuccessAction.class),
+                                               any(FailureAction.class));
+        ImmutableMessage capturedMessage = messageCaptor.getValue();
+        assertEquals(Message.MessageType.VALUE_MESSAGE_TYPE_REQUEST, capturedMessage.getType());
+        assertEquals(getGcdParticipantId(), capturedMessage.getRecipient());
+
+        reset(mqttMessagingStubMock);
+
+        try {
+            MutableMessage replyMessage = createVoidReply(capturedMessage);
+            fakeIncomingMqttMessage(gbids[0], replyMessage);
+            // wait for successful registration
+            future.get(10000);
+        } catch (Exception e) {
+            fail("Provider registration failed: " + e.toString());
+        }
+    }
+
+    protected ArgumentCaptor<ImmutableMessage> prepareGlobalRemove(CountDownLatch removeCdl) {
+        ArgumentCaptor<ImmutableMessage> messageCaptor = ArgumentCaptor.forClass(ImmutableMessage.class);
+        doAnswer(createVoidCountDownAnswer(removeCdl)).when(mqttMessagingStubMock)
+                                                      .transmit(messageCaptor.capture(),
+                                                                any(SuccessAction.class),
+                                                                any(FailureAction.class));
+        return messageCaptor;
+    }
+
+    protected void waitForGlobalRemove(CountDownLatch removeCdl, ArgumentCaptor<ImmutableMessage> msgCaptor) {
+
+        try {
+            assertTrue(removeCdl.await(10000, TimeUnit.MILLISECONDS));
+        } catch (InterruptedException e) {
+            fail(e.toString());
+        }
+
+        verify(mqttMessagingStubMock).transmit(any(ImmutableMessage.class),
+                                               any(SuccessAction.class),
+                                               any(FailureAction.class));
+        ImmutableMessage capturedMessage = msgCaptor.getValue();
+        assertEquals(Message.MessageType.VALUE_MESSAGE_TYPE_REQUEST, capturedMessage.getType());
+        assertEquals(getGcdParticipantId(), capturedMessage.getRecipient());
+
+        try {
+            MutableMessage replyMessage = createVoidReply(capturedMessage);
+            fakeIncomingMqttMessage(gbids[0], replyMessage);
+        } catch (Exception e) {
+            fail("Provider unregistration failed: " + e.toString());
+        }
+
+        reset(mqttMessagingStubMock);
+    }
+
+    protected void unregisterGlobal(String domain, Object provider) {
+        reset(mqttMessagingStubMock);
+        CountDownLatch removeCdl = new CountDownLatch(1);
+        ArgumentCaptor<ImmutableMessage> msgCaptor = prepareGlobalRemove(removeCdl);
         joynrRuntime.unregisterProvider(domain, provider);
-        waitForGlobalRemove();
+        waitForGlobalRemove(removeCdl, msgCaptor);
         // Wait for a while until global remove has finished (reply processed at LCD)
         try {
             Thread.sleep(200);

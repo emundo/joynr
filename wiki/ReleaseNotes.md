@@ -2,6 +2,57 @@
 All relevant changes are documented in this file. You can find more information about
 the versioning scheme [here](JoynrVersioning.md).
 
+# joynr 1.17.0
+
+## API-relevant Changes
+* **[Generator]** Setting the `jee` flag does not lead to a warning anymore.
+  It is now completely removed from the generator.
+
+## Other Changes
+* **[Java]** Global provider registration without awaitGlobalRegistration is now retried
+  automatically after timeouts until it succeeds or an unrecoverable error occurs. A single try
+  uses the default ttl of 60 seconds towards GlobalCapabilitiesDirectory.  
+  Note that the application still does not get informed about the result (success or unrecoverable
+  error) of the global registration at GlobalCapabilitiesDirectory.  
+  Examples for unrecoverable errors: all types of `DiscoveryError` (e.g. `INVALID_GBID`).
+* **[All]** Aligned the internal ttls for lookup calls (provider discovery for proxy creation)
+  to make sure that replies or errors from `GlobalCapabilitiesDirectory` are reported via the
+  libjoynr `ProxyBuilder` or `GuidedProxyBuilder` instead of generic timeout error.
+* **[Java,C++]** No more `SubscriptionStop` message is sent when a multicast (non selective
+  broadcast) subscription is unregistered. The message is not required because the provider side
+  does not store any information about multicast subscriptions.
+* **[C++]** Removed exec permissions on uds socket.
+* **[Maven]** Removed unused declared dependencies from `pom.xml` files.
+
+## Configuration Property Changes
+None.
+
+## Security Fixes
+None.
+
+## Bug fixes
+None.
+
+# joynr 1.16.1
+
+## API-relevant Changes
+None.
+
+## Other Changes
+* **[Java]** Fixed logger name in `ProviderDirectory`. Logger name was `ReplyCallerDirectory`
+  before.
+* **[Java]** Added missing log to `RoutingTableImpl.incrementReferenceCount`.
+* **[Java]** Finalized integration tests for improved handling of routing entries.
+
+## Configuration Property Changes
+None.
+
+## Security Fixes
+None.
+
+## Bug Fixes
+* **[Java]** Fixed a potential deadlock on provider side in `PublicationManagerImpl`.
+
 # joynr 1.16.0
 
 ## API-relevant Changes

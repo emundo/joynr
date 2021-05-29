@@ -2,7 +2,7 @@
 <!--
   #%L
   %%
-  Copyright (C) 2011 - 2016 BMW Car IT GmbH
+  Copyright (C) 2021 BMW Car IT GmbH
   %%
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@
 	<parent>
 		<groupId>io.joynr.tests.joynr-hivemq-shared-subscriptions</groupId>
 		<artifactId>test-apps</artifactId>
-		<version>1.16.0</version>
+		<version>1.17.0</version>
 	</parent>
 
 	<build>
@@ -50,9 +50,6 @@
 							<model>${basedir}/src/main/model/pingservice.fidl</model>
 							<generationLanguage>java</generationLanguage>
 							<outputPath>${basedir}/src/main/generated</outputPath>
-							<parameter>
-								<jee>true</jee>
-							</parameter>
 						</configuration>
 					</execution>
 				</executions>
@@ -108,16 +105,6 @@
 			<groupId>io.joynr.java</groupId>
 			<artifactId>javaapi</artifactId>
 			<version>${project.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>io.joynr.java</groupId>
-			<artifactId>jeeintegration</artifactId>
-			<version>${project.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>javax</groupId>
-			<artifactId>javaee-api</artifactId>
-			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>org.slf4j</groupId>

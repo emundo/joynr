@@ -2,7 +2,7 @@
 <!--
   #%L
   %%
-  Copyright (C) 2011 - 2017 BMW Car IT GmbH
+  Copyright (C) 2021 BMW Car IT GmbH
   %%
   Licensed under the Apache License, Version 2.0 (the "License");
   you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@
 	<parent>
 		<groupId>io.joynr.tests</groupId>
 		<artifactId>inter-language-test-jee</artifactId>
-		<version>1.16.0</version>
+		<version>1.17.0</version>
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 
@@ -46,9 +46,6 @@
 							<model>${basedir}/../../inter-language-test/src/main/model</model>
 							<generationLanguage>java</generationLanguage>
 							<outputPath>${basedir}/src/main/generated</outputPath>
-							<parameter>
-								<jee>true</jee>
-							</parameter>
 						</configuration>
 					</execution>
 				</executions>
@@ -100,15 +97,6 @@
 		<dependency>
 			<groupId>io.joynr.java</groupId>
 			<artifactId>javaapi</artifactId>
-			<version>${project.version}</version>
-		</dependency>
-		<dependency>
-			<groupId>io.joynr.java</groupId>
-			<artifactId>jeeintegration</artifactId>
-		</dependency>
-		<dependency>
-			<groupId>io.joynr.java.messaging</groupId>
-			<artifactId>messaging-common</artifactId>
 			<version>${project.version}</version>
 		</dependency>
 		<dependency>
