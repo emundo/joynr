@@ -199,6 +199,8 @@ cluster-docker:
 
 publish:
     stage: publish
+    services:
+        - docker:dind
     dependencies: []
     image: mminks/dind-aech:latest
     needs:
